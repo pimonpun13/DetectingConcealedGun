@@ -8,15 +8,17 @@ import torch.utils.data
 import numpy as np
 from opt import opt
 
-from dataloader import ImageLoader, DetectionLoader, DetectionProcessor, DataWriter, Mscoco
+from dataloader import VideoLoader, DetectionLoader, DetectionProcessor, DataWriter, Mscoco
 from yolo.util import write_results, dynamic_write_results
 from SPPE.src.main_fast_inference import *
 
+import ntpath
 import os
 import sys
 from tqdm import tqdm
 import time
 from fn import getTime
+import cv2
 
 from pPose_nms import pose_nms, write_json
 
@@ -27,22 +29,17 @@ if not args.sp:
     torch.multiprocessing.set_sharing_strategy('file_system')
 
 if __name__ == "__main__":
-    inputpath = args.inputpath
-    inputlist = args.inputlist
+    videofile = args.video
     mode = args.mode
     if not os.path.exists(args.outputpath):
         os.mkdir(args.outputpath)
+    
+    if not len(videofile):
+        raise IOError('Error: must contain --video')
 
-    if len(inputlist):
-        im_names = open(inputlist, 'r').readlines()
-    elif len(inputpath) and inputpath != '/':
-        for root, dirs, files in os.walk(inputpath):
-            im_names = files
-    else:
-        raise IOError('Error: must contain either --indir/--list')
-
-    # Load input images
-    data_loader = ImageLoader(im_names, batchSize=args.detbatch, format='yolo').start()
+    # Load input video
+    data_loader = VideoLoader(videofile, batchSize=args.detbatch).start()
+    (fourcc,fps,frameSize) = data_loader.videoinfo()
 
     # Load detection loader
     print('Loading YOLO model..')
@@ -65,17 +62,18 @@ if __name__ == "__main__":
         'pn': []
     }
 
-    # Init data writer
-    writer = DataWriter(args.save_video).start()
+    # Data writer
+    save_path = os.path.join(args.outputpath, 'AlphaPose_'+ntpath.basename(videofile).split('.')[0]+'.avi')
+    writer = DataWriter(args.save_video, save_path, cv2.VideoWriter_fourcc(*'XVID'), fps, frameSize).start()
 
-    data_len = data_loader.length()
-    im_names_desc = tqdm(range(data_len))
-
+    im_names_desc =  tqdm(range(data_loader.length()))
     batchSize = args.posebatch
     for i in im_names_desc:
         start_time = getTime()
         with torch.no_grad():
             (inps, orig_img, im_name, boxes, scores, pt1, pt2) = det_processor.read()
+            if orig_img is None:
+                break
             if boxes is None or boxes.nelement() == 0:
                 writer.save(None, None, None, None, None, orig_img, im_name.split('/')[-1])
                 continue
@@ -97,12 +95,13 @@ if __name__ == "__main__":
             hm = torch.cat(hm)
             ckpt_time, pose_time = getTime(ckpt_time)
             runtime_profile['pt'].append(pose_time)
-            hm = hm.cpu()
+
+            hm = hm.cpu().data
             writer.save(boxes, scores, hm, pt1, pt2, orig_img, im_name.split('/')[-1])
 
             ckpt_time, post_time = getTime(ckpt_time)
             runtime_profile['pn'].append(post_time)
-        
+
         if args.profile:
             # TQDM
             im_names_desc.set_description(
